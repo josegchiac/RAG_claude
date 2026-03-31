@@ -1,0 +1,8 @@
+anthropic
+chromadb
+sentence-transformers
+pypdf
+python-dotenv
+numpy
+python-docx
+tiktoken

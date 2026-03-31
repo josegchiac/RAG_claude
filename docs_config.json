@@ -1,0 +1,14 @@
+{
+  "Procedimiento_Incremento_Precios_CH.pdf": {
+    "tema_principal": "cálculo y aprobación de incrementos de precios en los paises de la region andina",
+    "categoria": "precios",
+    "proceso": "Incremento o modificación de precios",
+    "responsable": "Net Revenue Manager/Marketing"
+  },
+  "manual_ventas.pdf": {
+    "tema_principal": "proceso de ventas",
+    "categoria": "comercial",
+    "proceso": "cierre de oportunidades",
+    "responsable": "equipo de ventas"
+  }
+}
