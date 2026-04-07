@@ -26,6 +26,11 @@ def _embed(texts: list[str]) -> list[list[float]]:
     return vectors.tolist()
 
 
+def embed(texts: list[str]) -> list[list[float]]:
+    """Wrapper publico de _embed para uso en otros modulos."""
+    return _embed(texts)
+
+
 # --------------------------------------------------------------------------- #
 # Escritura                                                                     #
 # --------------------------------------------------------------------------- #
@@ -109,12 +114,14 @@ def search(
     results = collection.query(**kwargs)
 
     output = []
-    for doc, meta, dist in zip(
+    for chunk_id, doc, meta, dist in zip(
+        results["ids"][0],
         results["documents"][0],
         results["metadatas"][0],
         results["distances"][0],
     ):
         output.append({
+            "chunk_id": chunk_id,
             "text": doc,
             "score": round(1 - dist, 4),   # distancia coseno → similitud
             **meta,
@@ -137,6 +144,25 @@ def collection_info() -> dict:
     }
 
 
+def get_by_ids(chunk_ids: list[str]) -> list[dict]:
+    """Recupera chunks especificos por sus IDs de ChromaDB.
+
+    Usado por el retrieval basado en grafo para obtener los chunks
+    vinculados a las entidades encontradas.
+    """
+    if not chunk_ids:
+        return []
+    collection = _get_collection()
+    results = collection.get(
+        ids=chunk_ids,
+        include=["documents", "metadatas"],
+    )
+    output = []
+    for chunk_id, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
+        output.append({"chunk_id": chunk_id, "text": doc, "score": None, **meta})
+    return output
+
+
 def delete_by_source(source: str) -> None:
     """Elimina todos los chunks de un documento especifico."""
     collection = _get_collection()
@@ -153,7 +179,7 @@ def get_metadata_values(fields: list[str] | None = None) -> dict[str, list[str]]
         Dict campo -> lista de valores unicos no vacios, ordenados alfabeticamente.
     """
     if fields is None:
-        fields = ["categoria", "source"]
+        fields = ["proceso", "source"]
 
     collection = _get_collection()
     results = collection.get(include=["metadatas"])

@@ -6,3 +6,5 @@ python-dotenv
 numpy
 python-docx
 tiktoken
+networkx
+pyvis

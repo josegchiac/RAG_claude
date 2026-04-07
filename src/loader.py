@@ -10,6 +10,9 @@ from datetime import date
 from pathlib import Path
 from docx import Document
 
+import graphstore
+from utils import parse_json_response
+
 
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
@@ -126,12 +129,73 @@ def _semantic_metadata_from_claude(text: str, filename: str, doc_summary: str, b
         messages=[{"role": "user", "content": prompt}],
     )
     raw = response.content[0].text.strip()
-    start = raw.find("{")
-    end = raw.rfind("}") + 1
-    result = json.loads(raw[start:end])
+    result = parse_json_response(raw)
     if "categoria" in result and result["categoria"]:
         result["categoria"] = result["categoria"].strip().title()
     return result
+
+
+def _extract_graph_from_claude(
+    text: str,
+    filename: str,
+    existing_entities: list[str],
+    base_config: dict | None = None,
+) -> dict:
+    """Llama a Claude Haiku para extraer entidades y relaciones de un chunk.
+
+    Args:
+        text:               Texto del chunk (puede venir de Vision o pdfplumber).
+        filename:           Nombre del documento fuente.
+        existing_entities:  IDs ya extraidos en el documento (para consistencia).
+        base_config:        Metadata base del docs_config.json para tipar mejor.
+
+    Returns:
+        Dict con "entities" y "relations". En caso de error retorna listas vacias.
+    """
+    config_context = ""
+    if base_config:
+        config_context = (
+            f"Contexto del documento: {base_config.get('tema_principal', '')}. "
+            f"Categoría: {base_config.get('categoria', '')}. "
+            f"Proceso: {base_config.get('proceso', '')}.\n\n"
+        )
+
+    known = json.dumps(existing_entities, ensure_ascii=False) if existing_entities else "[]"
+
+    prompt = (
+        f"Documento: {filename}\n"
+        f"{config_context}"
+        f"Entidades ya conocidas (reutiliza estos IDs exactos si aparecen):\n"
+        f"{known}\n\n"
+        f"Texto:\n{text}\n\n"
+        "Extrae entidades y relaciones. "
+        "Tipos válidos: rol, departamento, herramienta, normativa, "
+        "proceso, sistema, canal, segmento, región, cliente, producto.\n"
+        "REGLAS DE FORMATO (obligatorias):\n"
+        "- Responde SOLO con el objeto JSON, sin texto antes ni después.\n"
+        "- Sin bloques de código markdown (no uses ```json).\n"
+        "- Formato JSON compacto: sin saltos de línea ni indentación extra.\n"
+        "- Cada valor string en UNA SOLA LÍNEA, sin saltos de línea internos.\n"
+        "- IDs en snake_case, máximo 4 palabras (ej: net_revenue_manager).\n"
+        "- Labels máximo 5 palabras, sin comillas ni caracteres especiales.\n"
+        "- Máximo 8 entidades y 8 relaciones por respuesta.\n"
+        "- No incluyas comentarios ni texto explicativo dentro del JSON.\n"
+        "Formato exacto:\n"
+        '{"entities": [{"id": "snake_case", "label": "Nombre Corto", "type": "tipo"}], '
+        '"relations": [{"from": "id_origen", "rel": "verbo_relacion", "to": "id_destino"}]}'
+    )
+
+    response = _client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=2000,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw = response.content[0].text.strip()
+    try:
+        return parse_json_response(raw)
+    except Exception as parse_err:
+        preview = raw[:500].replace("\n", "\\n")
+        raise ValueError(f"{parse_err} | RAW: {preview}") from parse_err
 
 
 def _build_metadata(filename: str, page: int | None, chunk_index: int) -> dict:
@@ -182,7 +246,7 @@ def _needs_vision(page: "pdfplumber.page.Page") -> bool:
                 continue
             # Condicion 2: celdas combinadas (None) > 60% en alguna fila
             none_ratio = sum(1 for c in row if c is None) / len(row)
-            if none_ratio > 0.6:
+            if none_ratio > 0.5:
                 return True
             # Condicion 3: fila con una sola celda de mas de 100 chars
             non_none = [c for c in row if c is not None]
@@ -260,6 +324,8 @@ def load_pdf(path: str, enrich: bool = True, use_vision: bool = True) -> list[di
         base_config = config.get(filename)
 
         result = []
+        existing_entities: list[str] = []  # global al documento, no por pagina
+
         for page_num, page in enumerate(pdf.pages, start=1):
             try:
                 if use_vision and _needs_vision(page):
@@ -281,6 +347,23 @@ def load_pdf(path: str, enrich: bool = True, use_vision: bool = True) -> list[di
                 if enrich:
                     semantic = _semantic_metadata_from_claude(chunk, filename, doc_summary, base_config)
                     metadata.update({"semantic_source": "claude", **semantic})
+
+                    try:
+                        graph_data = _extract_graph_from_claude(
+                            chunk, filename, existing_entities, base_config
+                        )
+                        existing_entities += [
+                            e["id"] for e in graph_data.get("entities", [])
+                            if e["id"] not in existing_entities
+                        ]
+                        graphstore.add_chunk_graph(
+                            chunk_id=metadata["chunk_id"],
+                            entities=graph_data.get("entities", []),
+                            relations=graph_data.get("relations", []),
+                        )
+                    except Exception as e:
+                        print(f"  [Graph error p{page_num} c{i}: {e}]")
+
                 result.append({"text": chunk, **metadata})
 
     print(f"Vision: {vision_pages} páginas | pdfplumber: {plumber_pages} páginas")
@@ -296,6 +379,8 @@ def load_docx(path: str, enrich: bool = True) -> list[dict]:
 
     base_config = config.get(filename)
     result = []
+    existing_entities: list[str] = []
+
     for i, chunk in enumerate(_split_text(full_text)):
         if not chunk.strip():
             continue
@@ -303,6 +388,23 @@ def load_docx(path: str, enrich: bool = True) -> list[dict]:
         if enrich:
             semantic = _semantic_metadata_from_claude(chunk, filename, doc_summary, base_config)
             metadata.update({"semantic_source": "claude", **semantic})
+
+            try:
+                graph_data = _extract_graph_from_claude(
+                    chunk, filename, existing_entities, base_config
+                )
+                existing_entities += [
+                    e["id"] for e in graph_data.get("entities", [])
+                    if e["id"] not in existing_entities
+                ]
+                graphstore.add_chunk_graph(
+                    chunk_id=metadata["chunk_id"],
+                    entities=graph_data.get("entities", []),
+                    relations=graph_data.get("relations", []),
+                )
+            except Exception as e:
+                print(f"  [Graph error chunk {i}: {e}]")
+
         result.append({"text": chunk, **metadata})
 
     return result

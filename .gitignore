@@ -6,3 +6,5 @@ __pycache__/
 data/
 docs/
 RAG/
+chunks_export.json
+graph.html

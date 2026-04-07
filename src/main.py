@@ -9,6 +9,8 @@ load_dotenv()
 from loader import load_document
 from vectorstore import add_chunks, collection_info, delete_by_source
 from retriever import ask, ask_stream
+import graphstore
+from visualize import build_html
 
 
 DOCS_PATH = Path(__file__).parent.parent / "docs"
@@ -48,7 +50,8 @@ def reindex_document(path: str, enrich: bool = True) -> None:
     """Elimina e indexa nuevamente un documento (para actualizaciones)."""
     filename = Path(path).name
     delete_by_source(filename)
-    print(f"Chunks anteriores de '{filename}' eliminados")
+    graphstore.delete_by_source(filename)
+    print(f"Chunks anteriores de '{filename}' eliminados (vectorstore + grafo)")
     index_document(path, enrich=enrich)
 
 
@@ -76,7 +79,9 @@ def query(question: str, filters: dict | None = None, stream: bool = True) -> No
         print("\nFuentes utilizadas:")
         for s in result["sources"]:
             page_info = f" p.{s['page']}" if s["page"] else ""
-            print(f"  - {s['source']}{page_info} (relevancia: {s['score']})")
+            score_info = f" | score: {s['score']}" if s["score"] else ""
+            via = s.get("retrieval_source", "vector")
+            print(f"  [{via}] {s['source']}{page_info}{score_info}")
 
 
 # --------------------------------------------------------------------------- #
@@ -89,8 +94,10 @@ Uso:
   python main.py index              Indexa todos los docs de /docs
   python main.py index <archivo>    Indexa un archivo especifico
   python main.py reindex <archivo>  Reindexar un archivo actualizado
-  python main.py ask "<pregunta>"   Hace una pregunta al RAG
-  python main.py info               Muestra info de la base vectorial
+  python main.py ask "<pregunta>"            Hace una pregunta al RAG (streaming)
+  python main.py ask "<pregunta>" --no-stream Muestra fuentes con origen (vector/graph)
+  python main.py info               Muestra info de la base vectorial y el grafo
+  python main.py graph              Genera y abre la visualizacion del grafo
 """)
 
 
@@ -111,19 +118,29 @@ if __name__ == "__main__":
 
     elif args[0] == "ask" and len(args) > 1:
         question = args[1]
-        # Filtros opcionales como pares clave=valor: python main.py ask "..." categoria=RRHH
+        stream = True
         filters = {}
         for arg in args[2:]:
-            if "=" in arg:
+            if arg == "--no-stream":
+                stream = False
+            elif "=" in arg:
                 k, v = arg.split("=", 1)
                 filters[k] = v
-        query(question, filters=filters or None)
+        query(question, filters=filters or None, stream=stream)
 
     elif args[0] == "info":
         info = collection_info()
         print(f"Coleccion : {info['collection']}")
         print(f"Chunks    : {info['total_chunks']}")
         print(f"Ruta      : {info['chroma_path']}")
+        ginfo = graphstore.graph_info()
+        print(f"\nGrafo     : {ginfo['total_nodes']} nodos | {ginfo['total_edges']} aristas")
+        for t, count in ginfo["nodes_by_type"].items():
+            print(f"  {t:<15} {count}")
+        print(f"Ruta      : {ginfo['graph_path']}")
+
+    elif args[0] == "graph":
+        build_html()
 
     else:
         _print_help()
